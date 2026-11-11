@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+"""ccm — Claude Code session manager.
+
+  ccm            open (or re-attach to) the manager
+  ccm --picker   run the picker only (used inside the ccm tmux server)
+
+Picker keys: type to filter · ↑/↓ PgUp/PgDn · Enter or click = open/focus ·
+Ctrl-N = new session in that dir · Ctrl-R = rescan · Esc = clear filter / detach
+F5 = toggle sessions sidebar in a grid window
+tmux keys:  F1 sessions list · F2 zoom pane · F3 next grid · click pane to focus
+"""
+import curses, json, locale, os, random, shlex, subprocess, sys, time
+from pathlib import Path
+
+HOME = Path.home()
+PROJECTS = HOME / ".claude" / "projects"
+CACHE = HOME / ".cache" / "ccm" / "index.json"
+CONF = HOME / ".config" / "ccm" / "tmux.conf"
+SOCKET = "ccm"
+PER_WINDOW = int(os.environ.get("CCM_PER_WINDOW", "4"))
+HEAD, TAIL = 256 * 1024, 256 * 1024
+
+
+# ---------------------------------------------------------------- session index
+def _parse(path: Path) -> dict:
+    size = path.stat().st_size
+    cwd = branch = prompt = None
+    with path.open("rb") as f:
+        for raw in f.read(HEAD).splitlines():
+            try:
+                d = json.loads(raw)
+            except Exception:
+                continue
+            cwd = cwd or d.get("cwd")
+            branch = branch or d.get("gitBranch")
+            if prompt is None and d.get("type") == "user" and not d.get("isMeta") and not d.get("isSidechain"):
+                c = d.get("message", {}).get("content")
+                if isinstance(c, list):
+                    c = " ".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
+                if isinstance(c, str) and c.strip() and not c.lstrip().startswith("<"):
+                    prompt = " ".join(c.split())
+            if cwd and prompt:
+                break
+        f.seek(max(0, size - TAIL))
+        custom = ai = None
+        for raw in reversed(f.read().splitlines()):
+            if b"-title" not in raw:
+                continue
+            try:
+                d = json.loads(raw)
+            except Exception:
+                continue
+            if d.get("type") == "custom-title" and not custom:
+                custom = d.get("customTitle")
+            elif d.get("type") == "ai-title" and not ai:
+                ai = d.get("aiTitle")
+            if custom:
+                break
+    return {"cwd": cwd, "branch": branch, "title": custom or ai or prompt}
+
+
+def load_sessions() -> list:
+    try:
+        cache = json.loads(CACHE.read_text())
+    except Exception:
+        cache = {}
+    out, fresh = [], {}
+    for p in PROJECTS.glob("*/*.jsonl"):
+        try:
+            st = p.stat()
+        except FileNotFoundError:
+            continue
+        key, sig = str(p), [st.st_mtime, st.st_size]
+        hit = cache.get(key)
+        meta = hit["meta"] if hit and hit["sig"] == sig else _parse(p)
+        fresh[key] = {"sig": sig, "meta": meta}
+        if meta.get("title"):
+            out.append({"sid": p.stem, "mtime": st.st_mtime, **meta})
+    CACHE.parent.mkdir(parents=True, exist_ok=True)
+    CACHE.write_text(json.dumps(fresh))
+    out.sort(key=lambda s: s["mtime"], reverse=True)
+    return out
+
+
+# ---------------------------------------------------------------- tmux helpers
+def tmux(*args) -> str:
+    return subprocess.run(["tmux", *args], capture_output=True, text=True).stdout.strip()
+
+
+def open_panes() -> dict:
+    """session-id -> (window_id, pane_id) for panes this manager opened."""
+    res = {}
+    for line in tmux("list-panes", "-s", "-F", "#{window_id} #{pane_id} #{@ccm_sid}").splitlines():
+        parts = line.split()
+        if len(parts) == 3:
+            res[parts[2]] = (parts[0], parts[1])
+    return res
+
+
+# (bright = focused, dim = unfocused) per pane
+PALETTE = [("colour39", "colour24"), ("colour170", "colour96"), ("colour114", "colour65"), ("colour214", "colour130"),
+           ("colour141", "colour60"), ("colour80", "colour30"), ("colour203", "colour131"), ("colour221", "colour137")]
+
+
+def colorize(pane: str, win: str):
+    used = set(tmux("list-panes", "-t", win, "-F", "#{@ccm_color}").split())
+    bright, dim = random.choice([c for c in PALETTE if c[0] not in used] or PALETTE)
+    tmux("set", "-p", "-t", pane, "@ccm_color", bright)
+    tmux("set", "-p", "-t", pane, "@ccm_dim", dim)
+SIDEBAR_W = int(os.environ.get("CCM_SIDEBAR_WIDTH", "44"))
+ME = f"{shlex.quote(sys.executable)} {shlex.quote(os.path.abspath(__file__))}"
+
+
+def grid_counts() -> dict:
+    """window_id -> [window_index, session panes (sidebar excluded), has_sidebar]."""
+    res = {}
+    for line in tmux("list-panes", "-s", "-F", "#{window_id} #{window_index} #{?@ccm_sidebar,1,0}").splitlines():
+        wid, idx, side = line.split()
+        r = res.setdefault(wid, [idx, 0, False])
+        if side == "1":
+            r[2] = True
+        else:
+            r[1] += 1
+    return res
+
+
+def _split(total: int, k: int) -> list:
+    usable = total - (k - 1)  # 1-cell border between neighbours
+    return [usable // k + (1 if i < usable % k else 0) for i in range(k)]
+
+
+def _checksum(s: str) -> str:
+    c = 0
+    for ch in s:
+        c = ((c >> 1) + ((c & 1) << 15) + ord(ch)) & 0xFFFF
+    return f"{c:04x}"
+
+
+def retile(win: str):
+    """Tile session panes; if a sidebar is present keep it as a fixed column on the left."""
+    panes = [l.split() for l in tmux("list-panes", "-t", win, "-F", "#{pane_id} #{?@ccm_sidebar,1,0}").splitlines()]
+    for line in tmux("list-panes", "-t", win, "-F", "#{?@ccm_dim,,#{pane_id} #{?@ccm_sidebar,1,0}}").splitlines():
+        if line.strip():  # backfill panes opened before colours existed
+            pid, sb = line.split()
+            if sb == "1":
+                tmux("set", "-p", "-t", pid, "@ccm_color", "colour250")
+                tmux("set", "-p", "-t", pid, "@ccm_dim", "colour240")
+            else:
+                colorize(pid, win)
+    side = [p for p, f in panes if f == "1"]
+    rest = [p for p, f in panes if f == "0"]
+    if not side:
+        tmux("select-layout", "-t", win, "tiled")
+        return
+    if not rest:
+        return
+    W, H = map(int, tmux("display", "-p", "-t", win, "#{window_width} #{window_height}").split())
+    sw = min(SIDEBAR_W, W // 2)
+    gx, gw = sw + 1, W - sw - 1
+    n = len(rest)
+    cols = 1
+    while cols * cols < n:
+        cols += 1
+    nrows = -(-n // cols)
+    rows, y, it = [], 0, iter(rest)
+    for r, rh in enumerate(_split(H, nrows)):
+        k = min(cols, n - r * cols)
+        cells, x = [], gx
+        for cw in _split(gw, k):
+            cells.append(f"{cw}x{rh},{x},{y},{next(it)[1:]}")
+            x += cw + 1
+        rows.append(cells[0] if k == 1 else f"{gw}x{rh},{gx},{y}{{{','.join(cells)}}}")
+        y += rh + 1
+    grid = rows[0] if nrows == 1 else f"{gw}x{H},{gx},0[{','.join(rows)}]"
+    body = f"{W}x{H},0,0{{{sw}x{H},0,0,{side[0][1:]},{grid}}}"
+    tmux("select-layout", "-t", win, f"{_checksum(body)},{body}")
+
+
+def toggle_sidebar(win: str):
+    for pid, f in (l.split() for l in tmux("list-panes", "-t", win, "-F", "#{pane_id} #{?@ccm_sidebar,1,0}").splitlines()):
+        if f == "1":
+            tmux("kill-pane", "-t", pid)
+            retile(win)
+            return
+    if tmux("display", "-p", "-t", win, "#{window_index}") == "0":
+        return  # the full sessions list is already here
+    pane = tmux("split-window", "-hbf", "-t", win, "-l", str(SIDEBAR_W), "-P", "-F", "#{pane_id}",
+                f"{ME} --picker --sidebar")
+    tmux("set", "-p", "-t", pane, "@ccm_sidebar", "1")
+    tmux("set", "-p", "-t", pane, "@ccm_title", "sessions")
+    tmux("set", "-p", "-t", pane, "@ccm_color", "colour250")
+    tmux("set", "-p", "-t", pane, "@ccm_dim", "colour240")
+    retile(win)
+    tmux("select-pane", "-t", pane)
+
+
+def launch(cmd: str, cwd: str, sid: str, title: str):
+    target, counts = None, grid_counts()
+    here = tmux("display", "-p", "-t", os.environ.get("TMUX_PANE", ""), "#{window_id}")
+    if here in counts and counts[here][2] and counts[here][1] < PER_WINDOW:
+        target = here  # opened from a sidebar: fill this window first
+    else:
+        for wid, (idx, n, _) in counts.items():
+            if idx != "0" and n < PER_WINDOW:
+                target = wid
+                break
+    if target:
+        pane = tmux("split-window", "-d", "-t", target, "-c", cwd, "-P", "-F", "#{pane_id}", cmd)
+    else:
+        pane = tmux("new-window", "-d", "-n", "grid", "-c", cwd, "-P", "-F", "#{pane_id}", cmd)
+        target = tmux("display", "-p", "-t", pane, "#{window_id}")
+    if not pane:
+        return
+    tmux("set", "-p", "-t", pane, "@ccm_sid", sid)
+    tmux("set", "-p", "-t", pane, "@ccm_title", title[:60])
+    colorize(pane, target)
+    retile(target)
+    tmux("select-window", "-t", target)
+    tmux("select-pane", "-t", pane)
+
+
+def open_session(s: dict, new: bool = False):
+    cwd = s["cwd"] if s.get("cwd") and os.path.isdir(s["cwd"]) else str(HOME)
+    if new:
+        launch("exec claude", cwd, "", f"new · {Path(cwd).name}")
+        return
+    live = open_panes().get(s["sid"])
+    if live:
+        tmux("select-window", "-t", live[0])
+        tmux("select-pane", "-t", live[1])
+        return
+    launch(f"exec claude --resume {shlex.quote(s['sid'])}", cwd, s["sid"], s["title"])
+
+
+# ---------------------------------------------------------------- picker UI
+def age(ts: float) -> str:
+    d = time.time() - ts
+    for unit, sec in (("w", 604800), ("d", 86400), ("h", 3600), ("m", 60)):
+        if d >= sec:
+            return f"{int(d // sec)}{unit}"
+    return "now"
+
+
+def project(s: dict) -> str:
+    cwd = s.get("cwd") or "?"
+    return "~" if cwd == str(HOME) else Path(cwd).name
+
+
+def picker(scr, sidebar=False):
+    curses.curs_set(0)
+    curses.use_default_colors()
+    for i, c in enumerate((curses.COLOR_GREEN, 214 if curses.COLORS > 214 else curses.COLOR_YELLOW, 244 if curses.COLORS > 244 else curses.COLOR_WHITE), 1):
+        curses.init_pair(i, c, -1)
+    curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+    curses.mouseinterval(0)
+    WHEEL_DOWN = getattr(curses, "BUTTON5_PRESSED", 0x200000)
+    scr.timeout(3000)
+
+    scr.addstr(0, 1, "scanning sessions…")
+    scr.refresh()
+    sessions, query, sel, top = load_sessions(), "", 0, 0
+    live, last_scan = open_panes(), time.time()
+
+    while True:
+        q = query.lower().split()
+        rows = [s for s in sessions
+                if all(w in f"{s['title']} {project(s)} {s.get('branch') or ''}".lower() for w in q)]
+        h, w = scr.getmaxyx()
+        body = max(1, h - 3)
+        sel = max(0, min(sel, len(rows) - 1))
+        top = min(max(top, sel - body + 1), sel) if rows else 0
+
+        scr.erase()
+        scr.addnstr(0, 0, f" Claude sessions ({len(rows)}/{len(sessions)})   filter: {query}▏", w - 1, curses.A_BOLD)
+        for i, s in enumerate(rows[top:top + body]):
+            y, idx = i + 1, top + i
+            mark = "●" if s["sid"] in live else " "
+            pw = 10 if sidebar else 18
+            proj = project(s)[:pw].ljust(pw)
+            line = f" {mark} {age(s['mtime']):>4}  {proj}  {s['title']}"
+            attr = curses.A_REVERSE if idx == sel else 0
+            scr.addnstr(y, 0, line.ljust(w - 1), w - 1, attr)
+            if mark != " ":
+                scr.addstr(y, 1, mark, attr | curses.color_pair(1))
+            scr.addnstr(y, 9, proj, w - 10, attr | curses.color_pair(2))
+        scr.addnstr(h - 1, 0, " ⏎/click open · ^N new · Esc close · F5 toggle" if sidebar else " Enter/click open · ● = open in grid · ^N new in dir · ^R rescan · Esc clear/detach · F1 here · F2 zoom",
+                    w - 1, curses.color_pair(3))
+        scr.refresh()
+
+        try:
+            k = scr.get_wch()
+        except curses.error:  # timeout -> just refresh
+            k = None
+        if time.time() - last_scan > 10 or k == "\x12":  # periodic or Ctrl-R
+            sessions, last_scan = load_sessions(), time.time()
+        live = open_panes()
+
+        if k == curses.KEY_DOWN:
+            sel += 1
+        elif k == curses.KEY_UP:
+            sel -= 1
+        elif k == curses.KEY_NPAGE:
+            sel += body
+        elif k == curses.KEY_PPAGE:
+            sel -= body
+        elif k == curses.KEY_HOME:
+            sel = 0
+        elif k == curses.KEY_END:
+            sel = len(rows) - 1
+        elif k in ("\n", "\r", curses.KEY_ENTER) and rows:
+            open_session(rows[sel])
+        elif k == "\x0e" and rows:  # Ctrl-N
+            open_session(rows[sel], new=True)
+        elif k in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+            query, sel = query[:-1], 0
+        elif k == "\x15":  # Ctrl-U
+            query, sel = "", 0
+        elif k == "\x1b":
+            if query:
+                query, sel = "", 0
+            elif sidebar:
+                toggle_sidebar(tmux("display", "-p", "-t", os.environ["TMUX_PANE"], "#{window_id}"))
+            else:
+                tmux("detach-client")
+        elif k == curses.KEY_MOUSE:
+            try:
+                _, mx, my, _, b = curses.getmouse()
+            except curses.error:
+                continue
+            if b & curses.BUTTON4_PRESSED:
+                sel -= 3
+            elif b & WHEEL_DOWN:
+                sel += 3
+            elif b & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED) and 1 <= my <= body:
+                idx = top + my - 1
+                if idx < len(rows):
+                    sel = idx
+                    open_session(rows[idx])
+        elif isinstance(k, str) and k.isprintable():
+            query, sel = query + k, 0
+
+
+def main():
+    locale.setlocale(locale.LC_ALL, "")
+    if "--retile" in sys.argv:
+        return retile(sys.argv[-1])
+    if "--toggle-sidebar" in sys.argv:
+        return toggle_sidebar(sys.argv[-1])
+    if "--picker" in sys.argv:
+        try:
+            curses.wrapper(picker, "--sidebar" in sys.argv)
+        except KeyboardInterrupt:
+            pass
+        return
+    env = {k: v for k, v in os.environ.items() if k != "TMUX"}
+    base = ["tmux", "-L", SOCKET, "-f", str(CONF)]
+    if subprocess.run(base + ["has-session", "-t", "ccm"], capture_output=True, env=env).returncode:
+        me = f"{shlex.quote(sys.executable)} {shlex.quote(os.path.abspath(__file__))} --picker"
+        subprocess.run(base + ["new-session", "-d", "-s", "ccm", "-n", "sessions", "-c", str(HOME),
+                               f"while :; do {me}; sleep 0.3; done"], env=env, check=True)
+    os.execvpe("tmux", base + ["attach", "-t", "ccm"], env)
+
+
+if __name__ == "__main__":
+    main()
