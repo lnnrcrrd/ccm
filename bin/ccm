@@ -363,46 +363,99 @@ def complete_dir(text: str) -> tuple:
     return _tilde(done), names
 
 
+def dir_suggestions(text: str, limit: int = 8) -> list:
+    """Folders matching what's typed after the last '/': prefix matches first, then substring (case-insensitive)."""
+    full = os.path.expanduser(text)
+    parent, stem = os.path.split(full)
+    parent = parent or "/"
+    try:
+        names = [n for n in os.listdir(parent) if os.path.isdir(os.path.join(parent, n))
+                 and (stem.startswith(".") or not n.startswith("."))]
+    except OSError:
+        return []
+    low = stem.lower()
+    pre = sorted(n for n in names if n.lower().startswith(low))
+    sub = sorted(n for n in names if low and low in n.lower() and n not in pre)
+    return [_tilde(os.path.join(parent, n)) + "/" for n in (pre + sub)[:limit]]
+
+
 def ask_dir(scr, initial: str):
-    """Bottom-line prompt for the new session's folder (Tab completes). Returns a path or None."""
-    text, note = _tilde(initial).rstrip("/") + "/", "Tab complete · Enter start · Esc cancel"
+    """Bottom prompt for the new session's folder with live folder suggestions. Returns a path or None."""
+    text = _tilde(initial).rstrip("/") + "/"
+    pick, note = 0, ""
     curses.curs_set(1)
     try:
         while True:
             h, w = scr.getmaxyx()
+            sugg = dir_suggestions(text, max(1, min(8, h - 6)))
+            pick = max(0, min(pick, len(sugg) - 1))
             label = " New session in: "
+            top_y = h - 2 - len(sugg)
+            for n, cand in enumerate(sugg):  # suggestion list just above the prompt
+                y = top_y + n
+                scr.move(y, 0); scr.clrtoeol()
+                attr = curses.A_REVERSE if n == pick else curses.color_pair(3)
+                scr.addnstr(y, 0, ("  ▸ " if n == pick else "    ") + cand[-(w - 6):], w - 1, attr)
             scr.move(h - 2, 0); scr.clrtoeol()
             scr.addnstr(h - 2, 0, label, w - 1, curses.A_BOLD | curses.color_pair(2))
-            scr.addnstr(h - 2, len(label), text[-(w - len(label) - 2):], max(0, w - len(label) - 1))
+            shown = text[-(w - len(label) - 2):]
+            scr.addnstr(h - 2, len(label), shown, max(0, w - len(label) - 1))
             scr.move(h - 1, 0); scr.clrtoeol()
-            scr.addnstr(h - 1, 0, " " + note, w - 1, curses.color_pair(3))
-            scr.move(h - 2, min(w - 2, len(label) + len(text)))
+            scr.addnstr(h - 1, 0, " " + (note or "↑↓ pick · Tab accept · Enter start · Esc cancel"), w - 1,
+                        curses.color_pair(3))
+            scr.move(h - 2, min(w - 2, len(label) + len(shown)))
             scr.refresh()
             try:
                 k = scr.get_wch()
             except curses.error:
                 continue
+            note = ""
             if k == "\x1b":
                 return None
             if k in ("\n", "\r", curses.KEY_ENTER):
                 path = os.path.abspath(os.path.expanduser(text.strip() or "~"))
+                if not os.path.isdir(path) and sugg:
+                    path = os.path.abspath(os.path.expanduser(sugg[pick]))
                 if os.path.isdir(path):
                     return path
                 note = f"not a folder: {_tilde(path)}"
-            elif k == "\t":
-                text, names = complete_dir(text)
-                note = "  ".join(names[:12]) + (" …" if len(names) > 12 else "") if len(names) > 1 else \
-                    ("no matching folder" if not names else "Tab complete · Enter start · Esc cancel")
+            elif k in ("\t", curses.KEY_RIGHT) and sugg:
+                text, pick = sugg[pick], 0
+            elif k == curses.KEY_DOWN:
+                pick += 1
+            elif k == curses.KEY_UP:
+                pick -= 1
             elif k in (curses.KEY_BACKSPACE, "\x7f", "\b"):
-                text = text[:-1]
+                text, pick = text[:-1], 0
             elif k == "\x15":  # Ctrl-U
-                text = ""
+                text, pick = "", 0
             elif k == "\x17":  # Ctrl-W: drop last path segment
                 text = text.rstrip("/").rsplit("/", 1)[0] + "/" if "/" in text.rstrip("/") else ""
+                pick = 0
+            elif k == curses.KEY_MOUSE:
+                try:
+                    _, _, my, _, b = curses.getmouse()
+                except curses.error:
+                    continue
+                if b & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED) and top_y <= my < top_y + len(sugg):
+                    text, pick = sugg[my - top_y], 0
             elif isinstance(k, str) and k.isprintable():
-                text += k
+                text, pick = text + k, 0
+            scr.erase()  # suggestion count changes; redraw cleanly next loop
     finally:
         curses.curs_set(0)
+
+
+def details(scr, s: dict, y0: int, w: int, lines: int):
+    """'Tooltip' box: full title of the highlighted/hovered session, then folder · branch · age."""
+    import textwrap
+    scr.addnstr(y0, 0, "─" * (w - 1), w - 1, curses.color_pair(3))
+    wrapped = textwrap.wrap(s["title"], max(10, w - 3))[:lines - 2] or [""]
+    for n, part in enumerate(wrapped):
+        scr.addnstr(y0 + 1 + n, 1, part, w - 2, curses.A_BOLD)
+    meta = f"{_tilde(s.get('cwd') or '?')}" + (f" · {s['branch']}" if s.get("branch") and s["branch"] != "HEAD" else "") \
+        + (" · just now" if age(s["mtime"]) == "now" else f" · {age(s['mtime'])} ago")
+    scr.addnstr(y0 + 1 + len(wrapped), 1, meta, w - 2, curses.color_pair(2))
 
 
 def picker(scr, sidebar=False):
@@ -417,7 +470,8 @@ def picker(scr, sidebar=False):
 
     scr.addstr(0, 1, "scanning sessions…")
     scr.refresh()
-    sessions, query, sel, top = load_sessions(), "", 0, 0
+    sessions, query, sel, top, hover = load_sessions(), "", 0, 0, None
+    sys.stdout.write("\033[?1003h"); sys.stdout.flush()  # ask for mouse-motion events (hover)
     live, last_scan = open_panes(), time.time()
 
     while True:
@@ -425,7 +479,8 @@ def picker(scr, sidebar=False):
         rows = [s for s in sessions
                 if all(w in f"{s['title']} {project(s)} {s.get('branch') or ''}".lower() for w in q)]
         h, w = scr.getmaxyx()
-        body = max(1, h - 3)
+        DET = 5 if h >= 16 else 0  # detail box: separator + up to 3 title lines + meta line
+        body = max(1, h - 3 - DET)
         sel = max(0, min(sel, len(rows) - 1))
         top = min(max(top, sel - body + 1), sel) if rows else 0
 
@@ -443,6 +498,9 @@ def picker(scr, sidebar=False):
             if mark != " ":
                 scr.addstr(y, 1, mark, attr | curses.color_pair(1))
             scr.addnstr(y, 9, proj, w - 10, attr | curses.color_pair(2))
+        if DET and rows:
+            cur = rows[hover] if hover is not None and hover < len(rows) else rows[sel]
+            details(scr, cur, h - 1 - DET, w, DET)
         scr.addnstr(h - 1, 0, " ⏎/click open · ^N new · Esc close · F5 toggle" if sidebar else " Enter/click open · ● = open in grid · ^N new in dir · ^R rescan · Esc clear/detach · F1 here · F2 zoom",
                     w - 1, curses.color_pair(3))
         scr.refresh()
@@ -453,7 +511,10 @@ def picker(scr, sidebar=False):
             k = None
         if time.time() - last_scan > 10 or k == "\x12":  # periodic or Ctrl-R
             sessions, last_scan = load_sessions(), time.time()
-        live = open_panes()
+        if k != curses.KEY_MOUSE:  # skip the tmux call on every mouse move
+            live = open_panes()
+        if k not in (None, curses.KEY_MOUSE):
+            hover = None
 
         if k == curses.KEY_DOWN:
             sel += 1
@@ -490,6 +551,9 @@ def picker(scr, sidebar=False):
                 _, mx, my, _, b = curses.getmouse()
             except curses.error:
                 continue
+            if b & curses.REPORT_MOUSE_POSITION and not b & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED):
+                hover = top + my - 1 if 1 <= my <= body and top + my - 1 < len(rows) else None
+                continue
             if b & curses.BUTTON4_PRESSED:
                 sel -= 3
             elif b & WHEEL_DOWN:
@@ -514,6 +578,7 @@ def main():
     if "--picker" in sys.argv:
         try:
             curses.wrapper(picker, "--sidebar" in sys.argv)
+            sys.stdout.write("\033[?1003l")
         except KeyboardInterrupt:
             pass
         return

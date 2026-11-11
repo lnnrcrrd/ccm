@@ -5,6 +5,7 @@ A terminal UI for browsing and resuming your [Claude Code](https://claude.com/cl
 - Lists every session in `~/.claude/projects`, newest first, with project and title
 - Click or press Enter to resume; sessions tile up to 4 per window
 - Toggleable sessions sidebar inside a grid window
+- Detail box shows the full title, folder and branch of the highlighted session (or the one under the mouse)
 - Each pane gets its own colour; the focused pane is highlighted
 - Notifications: when a session finishes or needs input while you're not looking at it, its pane gets a ✔ DONE / ⏳ NEEDS YOU badge, its window tab a ●, and Windows shows a toast (WSL)
 - Runs on its own tmux server (`tmux -L ccm`), so your normal tmux setup is untouched
@@ -29,7 +30,7 @@ ccm
 |---|---|---|
 | list / sidebar | type | filter by title, project or branch |
 | list / sidebar | Enter / click | resume (or focus it if already open) |
-| list / sidebar | Ctrl-N | new session: asks for a folder (pre-filled from the highlighted session, Tab completes) |
+| list / sidebar | Ctrl-N | new session: asks for a folder, with live folder suggestions (↑↓ pick, Tab accept) |
 | list / sidebar | Ctrl-R | rescan sessions |
 | list / sidebar | Esc | clear filter, then detach (list) or close (sidebar) |
 | anywhere | F1 | sessions list |
