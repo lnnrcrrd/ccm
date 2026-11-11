@@ -39,6 +39,8 @@ ccm
 | anywhere | F3 | next grid window |
 | anywhere | F4 | close pane |
 | grid | F5 | toggle sessions sidebar |
+| grid | Alt+arrows | move to the tile in that direction |
+| grid | F6 | cycle to the next tile |
 
 Run `ccm` again to re-attach; everything stays as you left it.
 
