@@ -55,7 +55,7 @@ Add these Claude Code hooks to `~/.claude/settings.json` (merge with any existin
 
 The hook does nothing outside ccm. Badges clear when you focus the pane.
 
-Toasts play ccm's own soft "blip" chimes (`sounds/done.wav`, `sounds/input.wav`, made by `tools/make_sounds.py`) instead of the Windows sound. Each chime starts with ~1 s of inaudible noise so Bluetooth headphones wake up before the blip plays. To use your own, drop `done.wav` / `input.wav` into `~/.config/ccm/`.
+Toasts play ccm's own soft "blip" chimes (`sounds/done.wav`, `sounds/input.wav`, made by `tools/make_sounds.py`) instead of the Windows sound. Each chime starts with ~2.5 s of inaudible noise so Bluetooth headphones wake up before the blip plays. To use your own, drop `done.wav` / `input.wav` into `~/.config/ccm/`.
 
 ## Settings
 

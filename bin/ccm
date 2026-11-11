@@ -141,7 +141,9 @@ def toast(title: str, body: str, kind: str = "done"):
         log(f"sound lookup failed: {e!r}")
     q = lambda t: t.replace("'", "''")[:200]
     ps = (
-        "[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]>$null;"
+        ""  # start the chime first (async): its silent lead-in wakes Bluetooth audio while the toast is built
+        + (f"$s=New-Object Media.SoundPlayer '{q(wav)}';$s.Load();$s.Play();" if wav else "")
+        + "[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]>$null;"
         "$t=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02);"
         "$x=$t.GetElementsByTagName('text');"
         f"$x.Item(0).AppendChild($t.CreateTextNode('{q(title)}'))>$null;"
@@ -150,15 +152,13 @@ def toast(title: str, body: str, kind: str = "done"):
         + "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("
         "'{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe')"
         ".Show([Windows.UI.Notifications.ToastNotification]::new($t));"
-        # SoundPlayer is synchronous and reliable; the chimes carry their own silent lead-in so the
-        # start isn't clipped while the audio device wakes up
-        + (f"$s=New-Object Media.SoundPlayer '{q(wav)}';$s.Load();$s.PlaySync()" if wav else "")
+        + ("Start-Sleep -Milliseconds 3500;'played '+(Get-Date -f HH:mm:ss)" if wav else "")  # keep alive until the chime ends
     )
     argv = [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", ps]
     if os.environ.get("TMUX"):
         # Run it from the tmux server: a hook's own child processes get killed when the hook exits,
         # which cut the chime off mid-play.
-        r = subprocess.run(["tmux", "run-shell", "-b", " ".join(shlex.quote(a) for a in argv) + " >/dev/null 2>&1"],
+        r = subprocess.run(["tmux", "run-shell", "-b", " ".join(shlex.quote(a) for a in argv) + f" >>{shlex.quote(str(CACHE.parent / 'ps.log'))} 2>&1"],
                            capture_output=True, text=True)
         if r.returncode:
             log(f"tmux run-shell failed rc={r.returncode}: {r.stderr.strip()[:200]}")

@@ -30,9 +30,9 @@ def render(notes, length):
     return buf
 
 
-# Bluetooth headphones swallow the first ~1 s of audio while they wake up, so each chime starts with
-# 1.2 s of inaudible noise (about -66 dB) to wake them before the blip plays.
-LEAD_IN = 1.2
+# Bluetooth headphones swallow the first 1-2+ s of audio while they wake up, so each chime starts with
+# 2.5 s of inaudible noise (about -66 dB) to wake them before the blip plays.
+LEAD_IN = 2.5
 
 
 def save(name, buf):
