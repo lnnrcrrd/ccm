@@ -141,14 +141,18 @@ def toast(title: str, body: str, kind: str = "done"):
         + "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("
         "'{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe')"
         ".Show([Windows.UI.Notifications.ToastNotification]::new($t));"
-        # MediaPlayer + a short pre-roll: SoundPlayer clipped short chimes while the audio device woke up
-        + ("Add-Type -AssemblyName PresentationCore;$p=New-Object System.Windows.Media.MediaPlayer;"
-           f"$p.Open([uri]'{q(wav)}');Start-Sleep -Milliseconds 300;$p.Play();Start-Sleep -Milliseconds 1200"
-           if wav else "")
+        # SoundPlayer is synchronous and reliable; the chimes carry their own silent lead-in so the
+        # start isn't clipped while the audio device wakes up
+        + (f"$s=New-Object Media.SoundPlayer '{q(wav)}';$s.Load();$s.PlaySync()" if wav else "")
     )
-    subprocess.Popen([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", ps],
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True)
+    argv = [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", ps]
+    if os.environ.get("TMUX"):
+        # Run it from the tmux server: a hook's own child processes get killed when the hook exits,
+        # which cut the chime off mid-play.
+        tmux("run-shell", "-b", " ".join(shlex.quote(a) for a in argv) + " >/dev/null 2>&1")
+    else:
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 def notify():
@@ -163,11 +167,17 @@ def notify():
     event = data.get("hook_event_name", "Stop")
     if event == "Notification" and data.get("notification_type") == "idle_prompt":
         return  # the "still waiting" reminder after a finished turn: already flagged
-    seen = tmux("display", "-p", "-t", pane, "#{&&:#{pane_active},#{&&:#{window_active},#{session_attached}}}")
-    if seen == "1":
-        return  # you're looking at it
     state = "input" if event == "Notification" else "done"
-    tmux("set", "-p", "-t", pane, "@ccm_state", state)
+    # Always toast + chime: tmux can't tell whether Windows Terminal is actually the window you're looking at.
+    # Only skip the badge on the pane that already has focus (it would be cleared on focus anyway).
+    visible = tmux("display", "-p", "-t", pane, "#{&&:#{pane_active},#{&&:#{window_active},#{session_attached}}}")
+    if visible != "1":
+        tmux("set", "-p", "-t", pane, "@ccm_state", state)
+    try:
+        with (CACHE.parent / "notify.log").open("a") as f:
+            f.write(f"{time.strftime('%F %T')} {event} {pane} {state} visible={visible}\n")
+    except Exception:
+        pass
     title = tmux("display", "-p", "-t", pane, "#{@ccm_title}") or "Claude"
     msg = data.get("message") or ("Needs your input" if state == "input" else "Finished")
     tmux("display-message", "-d", "4000", f"{'⏳' if state == 'input' else '✔'} {title}: {msg}")

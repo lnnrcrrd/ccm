@@ -30,7 +30,11 @@ def render(notes, length):
     return buf
 
 
+LEAD_IN = 0.35  # seconds of silence first: Windows clips the start of a sound while the audio device wakes up
+
+
 def save(name, buf):
+    buf = [0.0] * int(LEAD_IN * RATE) + buf
     OUT.mkdir(exist_ok=True)
     with wave.open(str(OUT / name), "wb") as w:
         w.setnchannels(1)
