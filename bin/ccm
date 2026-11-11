@@ -4,7 +4,7 @@
   ccm            open (or re-attach to) the manager
   ccm --picker   run the picker only (used inside the ccm tmux server)
 
-Picker keys: type to filter · ↑/↓ PgUp/PgDn · Enter or click = open/focus ·
+Picker keys: type to filter · ↑/↓ PgUp/PgDn · Enter or double-click = open/focus ·
 Ctrl-N = new session (asks for a folder; Tab completes) · Ctrl-R = rescan · Esc = clear filter / detach
 F5 = toggle sessions sidebar in a grid window
   ccm --notify   Claude Code Stop/Notification hook: flag pane + Windows toast
@@ -471,6 +471,7 @@ def picker(scr, sidebar=False):
     scr.addstr(0, 1, "scanning sessions…")
     scr.refresh()
     sessions, query, sel, top, hover = load_sessions(), "", 0, 0, None
+    last_click = 0.0
     sys.stdout.write("\033[?1003h"); sys.stdout.flush()  # ask for mouse-motion events (hover)
     live, last_scan = open_panes(), time.time()
 
@@ -501,7 +502,7 @@ def picker(scr, sidebar=False):
         if DET and rows:
             cur = rows[hover] if hover is not None and hover < len(rows) else rows[sel]
             details(scr, cur, h - 1 - DET, w, DET)
-        scr.addnstr(h - 1, 0, " ⏎/click open · ^N new · Esc close · F5 toggle" if sidebar else " Enter/click open · ● = open in grid · ^N new in dir · ^R rescan · Esc clear/detach · F1 here · F2 zoom",
+        scr.addnstr(h - 1, 0, " ⏎/double-click open · ^N new · Esc close · F5 toggle" if sidebar else " Enter/double-click open · ● = open in grid · ^N new in dir · ^R rescan · Esc clear/detach · F1 here · F2 zoom",
                     w - 1, curses.color_pair(3))
         scr.refresh()
 
@@ -560,9 +561,13 @@ def picker(scr, sidebar=False):
                 sel += 3
             elif b & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED) and 1 <= my <= body:
                 idx = top + my - 1
-                if idx < len(rows):
-                    sel = idx
-                    open_session(rows[idx])
+                if idx < len(rows):  # single click selects; double click (same row, < 0.4 s) opens
+                    now = time.time()
+                    if idx == sel and now - last_click < 0.4:
+                        open_session(rows[idx])
+                        last_click = 0.0
+                    else:
+                        sel, last_click = idx, now
         elif isinstance(k, str) and k.isprintable():
             query, sel = query + k, 0
 
