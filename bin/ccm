@@ -5,7 +5,7 @@
   ccm --picker   run the picker only (used inside the ccm tmux server)
 
 Picker keys: type to filter · ↑/↓ PgUp/PgDn · Enter or click = open/focus ·
-Ctrl-N = new session in that dir · Ctrl-R = rescan · Esc = clear filter / detach
+Ctrl-N = new session (asks for a folder; Tab completes) · Ctrl-R = rescan · Esc = clear filter / detach
 F5 = toggle sessions sidebar in a grid window
   ccm --notify   Claude Code Stop/Notification hook: flag pane + Windows toast
 tmux keys:  F1 sessions list · F2 zoom pane · F3 next grid · click pane to focus
@@ -314,11 +314,12 @@ def launch(cmd: str, cwd: str, sid: str, title: str):
     tmux("select-pane", "-t", pane)
 
 
-def open_session(s: dict, new: bool = False):
+def new_session(cwd: str):
+    launch("exec claude", cwd, "", f"new · {'~' if cwd == str(HOME) else Path(cwd).name}")
+
+
+def open_session(s: dict):
     cwd = s["cwd"] if s.get("cwd") and os.path.isdir(s["cwd"]) else str(HOME)
-    if new:
-        launch("exec claude", cwd, "", f"new · {Path(cwd).name}")
-        return
     live = open_panes().get(s["sid"])
     if live:
         tmux("select-window", "-t", live[0])
@@ -339,6 +340,69 @@ def age(ts: float) -> str:
 def project(s: dict) -> str:
     cwd = s.get("cwd") or "?"
     return "~" if cwd == str(HOME) else Path(cwd).name
+
+
+def _tilde(path: str) -> str:
+    return "~" + path[len(str(HOME)):] if path == str(HOME) or path.startswith(str(HOME) + "/") else path
+
+
+def complete_dir(text: str) -> tuple:
+    """Tab-complete a directory path. Returns (new_text, candidate names)."""
+    full = os.path.expanduser(text)
+    parent, stem = os.path.split(full)
+    try:
+        names = sorted(n for n in os.listdir(parent or "/")
+                       if n.startswith(stem) and os.path.isdir(os.path.join(parent or "/", n))
+                       and (stem.startswith(".") or not n.startswith(".")))
+    except OSError:
+        return text, []
+    if not names:
+        return text, []
+    common = os.path.commonprefix(names)
+    done = os.path.join(parent, common) + ("/" if len(names) == 1 else "")
+    return _tilde(done), names
+
+
+def ask_dir(scr, initial: str):
+    """Bottom-line prompt for the new session's folder (Tab completes). Returns a path or None."""
+    text, note = _tilde(initial).rstrip("/") + "/", "Tab complete · Enter start · Esc cancel"
+    curses.curs_set(1)
+    try:
+        while True:
+            h, w = scr.getmaxyx()
+            label = " New session in: "
+            scr.move(h - 2, 0); scr.clrtoeol()
+            scr.addnstr(h - 2, 0, label, w - 1, curses.A_BOLD | curses.color_pair(2))
+            scr.addnstr(h - 2, len(label), text[-(w - len(label) - 2):], max(0, w - len(label) - 1))
+            scr.move(h - 1, 0); scr.clrtoeol()
+            scr.addnstr(h - 1, 0, " " + note, w - 1, curses.color_pair(3))
+            scr.move(h - 2, min(w - 2, len(label) + len(text)))
+            scr.refresh()
+            try:
+                k = scr.get_wch()
+            except curses.error:
+                continue
+            if k == "\x1b":
+                return None
+            if k in ("\n", "\r", curses.KEY_ENTER):
+                path = os.path.abspath(os.path.expanduser(text.strip() or "~"))
+                if os.path.isdir(path):
+                    return path
+                note = f"not a folder: {_tilde(path)}"
+            elif k == "\t":
+                text, names = complete_dir(text)
+                note = "  ".join(names[:12]) + (" …" if len(names) > 12 else "") if len(names) > 1 else \
+                    ("no matching folder" if not names else "Tab complete · Enter start · Esc cancel")
+            elif k in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+                text = text[:-1]
+            elif k == "\x15":  # Ctrl-U
+                text = ""
+            elif k == "\x17":  # Ctrl-W: drop last path segment
+                text = text.rstrip("/").rsplit("/", 1)[0] + "/" if "/" in text.rstrip("/") else ""
+            elif isinstance(k, str) and k.isprintable():
+                text += k
+    finally:
+        curses.curs_set(0)
 
 
 def picker(scr, sidebar=False):
@@ -405,8 +469,11 @@ def picker(scr, sidebar=False):
             sel = len(rows) - 1
         elif k in ("\n", "\r", curses.KEY_ENTER) and rows:
             open_session(rows[sel])
-        elif k == "\x0e" and rows:  # Ctrl-N
-            open_session(rows[sel], new=True)
+        elif k == "\x0e":  # Ctrl-N: new session, folder prompt pre-filled from the highlighted one
+            start = rows[sel].get("cwd") if rows else None
+            path = ask_dir(scr, start if start and os.path.isdir(start) else str(HOME))
+            if path:
+                new_session(path)
         elif k in (curses.KEY_BACKSPACE, "\x7f", "\b"):
             query, sel = query[:-1], 0
         elif k == "\x15":  # Ctrl-U

@@ -29,7 +29,7 @@ ccm
 |---|---|---|
 | list / sidebar | type | filter by title, project or branch |
 | list / sidebar | Enter / click | resume (or focus it if already open) |
-| list / sidebar | Ctrl-N | new session in the selected session's directory |
+| list / sidebar | Ctrl-N | new session: asks for a folder (pre-filled from the highlighted session, Tab completes) |
 | list / sidebar | Ctrl-R | rescan sessions |
 | list / sidebar | Esc | clear filter, then detach (list) or close (sidebar) |
 | anywhere | F1 | sessions list |
