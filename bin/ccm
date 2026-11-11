@@ -122,14 +122,23 @@ def win_sound(kind: str) -> str:
     return f"{lad}\\ccm\\{src.name}"
 
 
+def log(msg: str):
+    try:
+        with (CACHE.parent / "notify.log").open("a") as f:
+            f.write(f"{time.strftime('%F %T')} {msg}\n")
+    except Exception:
+        pass
+
+
 def toast(title: str, body: str, kind: str = "done"):
     """Windows toast from WSL with ccm's own soft chime instead of the system sound (no-op elsewhere)."""
     if not os.path.exists(POWERSHELL):
         return
     try:
         wav = win_sound(kind)
-    except Exception:
+    except Exception as e:
         wav = ""
+        log(f"sound lookup failed: {e!r}")
     q = lambda t: t.replace("'", "''")[:200]
     ps = (
         "[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]>$null;"
@@ -149,7 +158,10 @@ def toast(title: str, body: str, kind: str = "done"):
     if os.environ.get("TMUX"):
         # Run it from the tmux server: a hook's own child processes get killed when the hook exits,
         # which cut the chime off mid-play.
-        tmux("run-shell", "-b", " ".join(shlex.quote(a) for a in argv) + " >/dev/null 2>&1")
+        r = subprocess.run(["tmux", "run-shell", "-b", " ".join(shlex.quote(a) for a in argv) + " >/dev/null 2>&1"],
+                           capture_output=True, text=True)
+        if r.returncode:
+            log(f"tmux run-shell failed rc={r.returncode}: {r.stderr.strip()[:200]}")
     else:
         subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
@@ -173,11 +185,7 @@ def notify():
     visible = tmux("display", "-p", "-t", pane, "#{&&:#{pane_active},#{&&:#{window_active},#{session_attached}}}")
     if visible != "1":
         tmux("set", "-p", "-t", pane, "@ccm_state", state)
-    try:
-        with (CACHE.parent / "notify.log").open("a") as f:
-            f.write(f"{time.strftime('%F %T')} {event} {pane} {state} visible={visible}\n")
-    except Exception:
-        pass
+    log(f"{event} {pane} {state}")
     title = tmux("display", "-p", "-t", pane, "#{@ccm_title}") or "Claude"
     msg = data.get("message") or ("Needs your input" if state == "input" else "Finished")
     tmux("display-message", "-d", "4000", f"{'⏳' if state == 'input' else '✔'} {title}: {msg}")
