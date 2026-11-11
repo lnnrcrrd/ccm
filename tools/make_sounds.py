@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Synthesize ccm's notification chimes (soft, short, quiet) into sounds/*.wav."""
-import math, random, struct, wave
+import math, struct, wave
 from pathlib import Path
 
 RATE = 44100
@@ -31,13 +31,13 @@ def render(notes, length):
 
 
 # Bluetooth headphones swallow the first 1-2+ s of audio while they wake up, so each chime starts with
-# 2.5 s of inaudible noise (about -66 dB) to wake them before the blip plays.
+# 2.5 s of digital silence: Windows opens the audio stream for it, which wakes them before the blip.
+# (Faint noise here was audible as a hiss over Bluetooth.)
 LEAD_IN = 2.5
 
 
 def save(name, buf):
-    rnd = random.Random(7)
-    buf = [rnd.uniform(-0.0005, 0.0005) for _ in range(int(LEAD_IN * RATE))] + buf
+    buf = [0.0] * int(LEAD_IN * RATE) + buf
     OUT.mkdir(exist_ok=True)
     with wave.open(str(OUT / name), "wb") as w:
         w.setnchannels(1)
