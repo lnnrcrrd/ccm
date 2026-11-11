@@ -2,6 +2,10 @@
 
 A terminal UI for browsing and resuming your [Claude Code](https://claude.com/claude-code) sessions, with several sessions side by side in a tmux grid.
 
+![ccm: sessions sidebar next to a 2x2 grid of Claude Code sessions](docs/screenshot.svg)
+
+<sub>Mock-up with made-up sessions (regenerate with `tools/make_screenshot.py`).</sub>
+
 - Lists every session in `~/.claude/projects`, newest first, with project and title
 - Double-click or press Enter to resume; sessions tile up to 4 per window
 - Toggleable sessions sidebar inside a grid window
