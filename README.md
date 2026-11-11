@@ -6,6 +6,7 @@ A terminal UI for browsing and resuming your [Claude Code](https://claude.com/cl
 - Click or press Enter to resume; sessions tile up to 4 per window
 - Toggleable sessions sidebar inside a grid window
 - Each pane gets its own colour; the focused pane is highlighted
+- Notifications: when a session finishes or needs input while you're not looking at it, its pane gets a ✔ DONE / ⏳ NEEDS YOU badge, its window tab a ●, and Windows shows a toast (WSL)
 - Runs on its own tmux server (`tmux -L ccm`), so your normal tmux setup is untouched
 
 ## Requirements
@@ -38,6 +39,21 @@ ccm
 | grid | F5 | toggle sessions sidebar |
 
 Run `ccm` again to re-attach; everything stays as you left it.
+
+## Notifications
+
+Add these Claude Code hooks to `~/.claude/settings.json` (merge with any existing ones):
+
+```json
+{
+  "hooks": {
+    "Stop": [{ "hooks": [{ "type": "command", "command": "~/.local/bin/ccm --notify 2>/dev/null || true", "async": true }] }],
+    "Notification": [{ "hooks": [{ "type": "command", "command": "~/.local/bin/ccm --notify 2>/dev/null || true", "async": true }] }]
+  }
+}
+```
+
+The hook does nothing outside ccm. Badges clear when you focus the pane.
 
 ## Settings
 
